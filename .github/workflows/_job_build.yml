@@ -50,12 +50,12 @@ jobs:
           fetch-tags: true
           submodules: false
 
-      - name: Pull
+      - name: Clone Proton
         if: startsWith(github.ref_name, 'Proton-Experimental') == false
         run: |
           git clone --recurse-submodules --branch proton-10.0-4 https://github.com/ValveSoftware/Proton.git proton
-      
-      - name: Pull Experimental
+
+      - name: Clone Proton Experimental
         if: startsWith(github.ref_name, 'Proton-Experimental')
         run: |
           git clone --recurse-submodules --branch experimental_10.0 https://github.com/ValveSoftware/Proton.git proton
@@ -66,7 +66,7 @@ jobs:
           git submodule update --init --recursive
           cp ../signal_x86_64.c wine/dlls/ntdll/unix/signal_x86_64.c
           # strip binaries at compile time to save space in the runner
-          patch -Np1 -i ./.github/patches/0001-build-strip-binaries-early.patch
+          patch -Np1 -i ../.github/patches/0001-build-strip-binaries-early.patch
           mkdir ../build && cd ../build
 
       - name: Configure
