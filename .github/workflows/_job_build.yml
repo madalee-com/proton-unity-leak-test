@@ -53,7 +53,7 @@ jobs:
       - name: Pull and Patch
         run: |
           git clone --recurse-submodules --branch proton-10.0-4 https://github.com/ValveSoftware/Proton.git proton
-          cd Proton
+          cd proton
           git submodule update --init --recursive
           cp ../signal_x86_64.c wine/dlls/ntdll/unix/signal_x86_64.c
           # strip binaries at compile time to save space in the runner
