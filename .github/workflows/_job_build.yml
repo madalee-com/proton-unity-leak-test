@@ -78,6 +78,11 @@ jobs:
         working-directory: ./build
         run: |
           make -j$(nproc) redist
+          mv ./redist ${{ inputs.name }}
+          tar -cvzf ${{ inputs.name }}.tar.gz ${{ inputs.name }}
+          sha512sum ${{ inputs.name }}.tar.gz > ${{ inputs.name }}.sha512sum
+          sha256sum ${{ inputs.name }}.* > SHA256SUMS
+          @echo "Proton build available at ${{ inputs.name }}.tar.gz"
 
       - name: Save cache
         id: ccache-save
