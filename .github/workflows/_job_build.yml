@@ -50,9 +50,18 @@ jobs:
           fetch-tags: true
           submodules: false
 
-      - name: Pull and Patch
+      - name: Pull
+        if: startsWith(github.ref_name, 'Proton-Experimental') == false
         run: |
           git clone --recurse-submodules --branch proton-10.0-4 https://github.com/ValveSoftware/Proton.git proton
+      
+      - name: Pull Experimental
+        if: startsWith(github.ref_name, 'Proton-Experimental')
+        run: |
+          git clone --recurse-submodules --branch experimental_10.0 https://github.com/ValveSoftware/Proton.git proton
+      
+      - name: Patch
+        run: |
           cd proton
           git submodule update --init --recursive
           cp ../signal_x86_64.c wine/dlls/ntdll/unix/signal_x86_64.c
