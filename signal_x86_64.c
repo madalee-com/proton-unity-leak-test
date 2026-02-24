@@ -3305,7 +3305,16 @@ __ASM_GLOBAL_FUNC( __wine_syscall_dispatcher,
                    "movq 0x28(%rcx),%rdi\n\t"
                    "movq 0x20(%rcx),%rsi\n\t"
                    "movq 0x08(%rcx),%rbx\n\t"
-                   "leaq 0x70(%rcx),%rsp\n\t"      /* %rsp > frame means no longer inside syscall */
+
+                   /* switch to user stack */
+                   /* %rsp outside kernel stack means no longer inside syscall */
+                   "movq 0x88(%rcx),%rsp\n\t"
+                   "movl 0xb4(%rcx),%edx\n\t"      /* frame->restore_flags */
+                   "testl $0x1,%edx\n\t"           /* CONTEXT_CONTROL | CONTEXT_INTEGER */
+                   "jz 1f\n\t"
+                   /* Set up rsp for iretq return paths below */
+                   "leaq 0x70(%rcx),%rsp\n\t"
+                   "1:\n\t"
 #ifdef __linux__
                    "testl $12,%r14d\n\t"           /* SYSCALL_HAVE_PTHREAD_TEB | SYSCALL_HAVE_WRFSGSBASE */
                    "jz 1f\n\t"
@@ -3416,7 +3425,6 @@ __ASM_GLOBAL_FUNC( __wine_syscall_dispatcher_instrumentation,
  *           __wine_unix_call_dispatcher
  */
 __ASM_GLOBAL_FUNC( __wine_unix_call_dispatcher,
-                   __ASM_CFI(".cfi_signal_frame\n\t")
                    "movq %rcx,%r10\n\t"
 #ifdef __APPLE__
                    "movq %gs:0x30,%rcx\n\t"
@@ -3427,7 +3435,7 @@ __ASM_GLOBAL_FUNC( __wine_unix_call_dispatcher,
                    "popq 0x70(%rcx)\n\t"           /* frame->rip */
                    __ASM_CFI(".cfi_adjust_cfa_offset -8\n\t")
                    __ASM_CFI_REG_IS_AT2(rip, rcx, 0xf0,0x00)
-                   "movl $0,0x94(%rcx)\n\t"        /* frame->restore_flags */
+                   "movl $0x20000,0xb4(%rcx)\n\t"  /* frame->restore_flags <- RESTORE_FLAGS_INCOMPLETE_FRAME_CONTEXT */
                    __ASM_LOCAL_LABEL("__wine_unix_call_dispatcher_prolog_end") ":\n\t"
                    "movq %rbx,0x08(%rcx)\n\t"
                    __ASM_CFI_REG_IS_AT1(rbx, rcx, 0x08)
@@ -3445,7 +3453,6 @@ __ASM_GLOBAL_FUNC( __wine_unix_call_dispatcher,
                    __ASM_CFI_REG_IS_AT2(r15, rcx, 0xe8, 0x00)
                    "movq %rsp,0x88(%rcx)\n\t"
                    __ASM_CFI_CFA_IS_AT2(rcx, 0x88, 0x01)
-                   __ASM_CFI_REG_IS_AT2(rsp, rcx, 0x88, 0x01)
                    "movq %rbp,0x98(%rcx)\n\t"
                    __ASM_CFI_REG_IS_AT2(rbp, rcx, 0x98, 0x01)
                    "movdqa %xmm6,0x1c0(%rcx)\n\t"
@@ -3459,26 +3466,36 @@ __ASM_GLOBAL_FUNC( __wine_unix_call_dispatcher,
                    "movdqa %xmm14,0x240(%rcx)\n\t"
                    "movdqa %xmm15,0x250(%rcx)\n\t"
                    "movl 0xb0(%rcx),%r14d\n\t"     /* frame->syscall_flags */
+                   /* switch to kernel stack */
+                   "movq %rcx,%rsp\n\t"
+                   /* we're now on the kernel stack, stitch unwind info with previous frame */
+                   __ASM_CFI(".cfi_remember_state\n\t")
+                   __ASM_CFI_CFA_IS_AT2(rsp, 0xa8, 0x01) /* frame->syscall_cfa */
+                   __ASM_CFI(".cfi_offset %rip,-0x08\n\t")
+                   __ASM_CFI(".cfi_offset %rbp,-0x10\n\t")
+                   __ASM_CFI(".cfi_offset %rbx,-0x18\n\t")
+                   __ASM_CFI(".cfi_offset %r12,-0x20\n\t")
+                   __ASM_CFI(".cfi_offset %r13,-0x28\n\t")
+                   __ASM_CFI(".cfi_offset %r14,-0x30\n\t")
+                   __ASM_CFI(".cfi_offset %r15,-0x38\n\t")
+                   __ASM_CFI(".cfi_undefined %rdi\n\t")
+                   __ASM_CFI(".cfi_undefined %rsi\n\t")
 #ifdef __linux__
                    "testl $12,%r14d\n\t"           /* SYSCALL_HAVE_PTHREAD_TEB | SYSCALL_HAVE_WRFSGSBASE */
                    "jz 2f\n\t"
-                   "movw %fs,0x7e(%rcx)\n\t"
-                   "movq %gs:0x330,%rsi\n\t"       /* amd64_thread_data()->pthread_teb */
+                   "movq %gs:0x320,%rsi\n\t"       /* amd64_thread_data()->pthread_teb */
                    "testl $8,%r14d\n\t"            /* SYSCALL_HAVE_WRFSGSBASE */
                    "jz 1f\n\t"
                    "wrfsbase %rsi\n\t"
                    "jmp 2f\n"
                    "1:\tmov $0x1002,%edi\n\t"      /* ARCH_SET_FS */
                    "mov $158,%eax\n\t"             /* SYS_arch_prctl */
-                   "mov %rcx,%r9\n\t"
                    "syscall\n\t"
-                   "mov %r9,%rcx\n\t"
                    "2:\n\t"
 #endif
-                   "movq %rcx,%rsp\n"
                    "movq %r8,%rdi\n\t"             /* args */
                    "callq *(%r10,%rdx,8)\n\t"
-                   "movq %rsp,%rcx\n"
+                   "movq %rsp,%rcx\n\t"
                    "movdqa 0x1c0(%rcx),%xmm6\n\t"
                    "movdqa 0x1d0(%rcx),%xmm7\n\t"
                    "movdqa 0x1e0(%rcx),%xmm8\n\t"
@@ -3489,25 +3506,21 @@ __ASM_GLOBAL_FUNC( __wine_unix_call_dispatcher,
                    "movdqa 0x230(%rcx),%xmm13\n\t"
                    "movdqa 0x240(%rcx),%xmm14\n\t"
                    "movdqa 0x250(%rcx),%xmm15\n\t"
-                   "testl $0xffff,0x94(%rcx)\n\t"  /* frame->restore_flags */
+                   "testl $0xffff,0xb4(%rcx)\n\t"  /* frame->restore_flags */
                    "jnz " __ASM_LOCAL_LABEL("__wine_syscall_dispatcher_return") "\n\t"
+                   /* switch to user stack */
+                   "movq 0x88(%rcx),%rsp\n\t"
+                   __ASM_CFI(".cfi_restore_state\n\t")
 #ifdef __linux__
                    "testl $12,%r14d\n\t"           /* SYSCALL_HAVE_PTHREAD_TEB | SYSCALL_HAVE_WRFSGSBASE */
                    "jz 1f\n\t"
-                   "movw 0x7e(%rcx),%fs\n"
+                   "movw %gs:0x338,%fs\n"          /* amd64_thread_data()->fs */
                    "1:\n\t"
 #endif
                    "movq 0x60(%rcx),%r14\n\t"
-                   __ASM_CFI(".cfi_same_value r14\n\t")
                    "movq 0x28(%rcx),%rdi\n\t"
-                   __ASM_CFI(".cfi_same_value rdi\n\t")
                    "movq 0x20(%rcx),%rsi\n\t"
-                   __ASM_CFI(".cfi_same_value rsi\n\t")
-                   "movq 0x88(%rcx),%rsp\n\t"
-                   __ASM_CFI(".cfi_def_cfa rsp, 0\n\t")
-                   __ASM_CFI(".cfi_same_value rsp\n\t")
                    "pushq 0x70(%rcx)\n\t"          /* frame->rip */
-                   __ASM_CFI(".cfi_adjust_cfa_offset 8\n\t")
                    "ret" )
 
 asm( ".data\n\t"
