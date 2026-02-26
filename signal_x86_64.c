@@ -3118,12 +3118,8 @@ __ASM_GLOBAL_FUNC( signal_start_thread,
  *           __wine_syscall_dispatcher
  */
 __ASM_GLOBAL_FUNC( __wine_syscall_dispatcher,
-#ifdef __APPLE__
-                   "movq %gs:0x30,%rcx\n\t"
-                   "movq 0x328(%rcx),%rcx\n\t"
-#else
-                   "movq %gs:0x328,%rcx\n\t"       /* amd64_thread_data()->syscall_frame */
-#endif
+                   __ASM_LOCAL_LABEL("__wine_syscall_dispatcher_gs_load") ":\n\t"
+                   "movq %gs:0x378,%rcx\n\t"       /* thread_data->syscall_frame */
                    "popq 0x70(%rcx)\n\t"           /* frame->rip */
                    __ASM_CFI(".cfi_adjust_cfa_offset -8\n\t")
                    __ASM_CFI_REG_IS_AT2(rip, rcx, 0xf0,0x00)
@@ -3155,25 +3151,20 @@ __ASM_GLOBAL_FUNC( __wine_syscall_dispatcher,
                    "movw %ss,0x90(%rcx)\n\t"
                    "movq %rbp,0x98(%rcx)\n\t"
                    __ASM_CFI_REG_IS_AT2(rbp, rcx, 0x98, 0x01)
+                   "movq %gs:0x30,%r13\n\t"        /* teb */
                    /* Legends of Runeterra hooks the first system call return instruction, and
                     * depends on us returning to it. Adjust the return address accordingly. */
                    "subq $0xb,0x70(%rcx)\n\t"
-                   "movl 0xb0(%rcx),%r14d\n\t"     /* frame->syscall_flags */
-                   "testl $3,%r14d\n\t"            /* SYSCALL_HAVE_XSAVE | SYSCALL_HAVE_XSAVEC */
+                   "cmpb $0,0x7ffe0285\n\t"        /* user_shared_data->ProcessorFeatures[PF_XSAVE_ENABLED] */
                    "jz 2f\n\t"
-#ifdef __APPLE__
-                   "movq %gs:0x30,%rdx\n\t"
-                   "movl 0x340(%rdx),%eax\n\t"
-#else
-                   "movl %gs:0x340,%eax\n\t"       /* amd64_thread_data()->xstate_features_mask */
-#endif
+                   "movl 0x7ffe03d8,%eax\n\t"      /* user_shared_data->XState.EnabledFeatures */
                    "xorl %edx,%edx\n\t"
                    "andl $7,%eax\n\t"
                    "xorq %rbp,%rbp\n\t"
                    "movq %rbp,0x2c0(%rcx)\n\t"
                    "movq %rbp,0x2c8(%rcx)\n\t"
                    "movq %rbp,0x2d0(%rcx)\n\t"
-                   "testl $2,%r14d\n\t"            /* SYSCALL_HAVE_XSAVEC */
+                   "testl $2,0x7ffe03ec\n\t"       /* user_shared_data->XState.CompactionEnabled */
                    "jz 1f\n\t"
                    "movq %rbp,0x2d8(%rcx)\n\t"
                    "movq %rbp,0x2e0(%rcx)\n\t"
@@ -3183,6 +3174,7 @@ __ASM_GLOBAL_FUNC( __wine_syscall_dispatcher,
                    /* The xsavec instruction is not supported by
                     * binutils < 2.25. */
                    ".byte 0x48, 0x0f, 0xc7, 0xa1, 0xc0, 0x00, 0x00, 0x00\n\t" /* xsavec64 0xc0(%rcx) */
+                   "stmxcsr 0xd8(%rcx)\n\t"        /* frame->xsave.MxCsr */
                    "jmp 3f\n"
                    "1:\txsave64 0xc0(%rcx)\n\t"
                    "jmp 3f\n"
@@ -3198,9 +3190,7 @@ __ASM_GLOBAL_FUNC( __wine_syscall_dispatcher,
                    __ASM_CFI_REG_IS_AT1(r14, rbp, 0x48)
                    __ASM_CFI_REG_IS_AT1(r15, rbp, 0x50)
                    __ASM_CFI_REG_IS_AT1(rbp, rbp, 0x00)
-                   "movq 0x28(%rsp),%r12\n\t"      /* 5th argument */
-                   "movq 0x30(%rsp),%r13\n\t"      /* 6th argument */
-                   "leaq 0x38(%rsp),%r15\n\t"      /* 7th argument */
+                   "leaq 0x28(%rsp),%r15\n\t"      /* 5th argument */
                    /* switch to kernel stack */
                    "movq %rcx,%rsp\n\t"
                    /* we're now on the kernel stack, stitch unwind info with previous frame */
@@ -3214,11 +3204,14 @@ __ASM_GLOBAL_FUNC( __wine_syscall_dispatcher,
                    __ASM_CFI(".cfi_offset %r15,-0x38\n\t")
                    __ASM_CFI(".cfi_undefined %rdi\n\t")
                    __ASM_CFI(".cfi_undefined %rsi\n\t")
+                   /* When on the kernel stack, use %r13 instead of %gs to access the TEB.
+                    * (on macOS, signal handlers set gsbase to pthread_teb when on the kernel stack).
+                    */
 #ifdef __linux__
-                   "testl $12,%r14d\n\t"           /* SYSCALL_HAVE_PTHREAD_TEB | SYSCALL_HAVE_WRFSGSBASE */
+                   "movq 0x320(%r13),%rsi\n\t"     /* amd64_thread_data()->pthread_teb */
+                   "testq %rsi,%rsi\n\t"
                    "jz 2f\n\t"
-                   "movq %gs:0x320,%rsi\n\t"       /* amd64_thread_data()->pthread_teb */
-                   "testl $8,%r14d\n\t"            /* SYSCALL_HAVE_WRFSGSBASE */
+                   "cmpb $0,0x7ffe028a\n\t"        /* user_shared_data->ProcessorFeatures[PF_RDWRFSGSBASE_AVAILABLE] */
                    "jz 1f\n\t"
                    "wrfsbase %rsi\n\t"
                    "jmp 2f\n"
@@ -3227,18 +3220,20 @@ __ASM_GLOBAL_FUNC( __wine_syscall_dispatcher,
                    "syscall\n\t"
                    "leaq -0x98(%rbp),%rcx\n"
                    "2:\n\t"
+#elif defined __APPLE__
+                   "movq 0x320(%r13),%rdi\n\t"     /* amd64_thread_data()->pthread_teb */
+                   "xorl %esi,%esi\n\t"
+                   "movl $0x3000003,%eax\n\t"      /* _thread_set_tsd_base */
+                   "syscall\n\t"
+                   "leaq -0x98(%rbp),%rcx\n"
 #endif
+                   "ldmxcsr 0x33c(%r13)\n\t"       /* amd64_thread_data()->mxcsr */
                    "movq 0x00(%rcx),%rax\n\t"
                    "movq 0x18(%rcx),%r11\n\t"      /* 2nd argument */
                    "movl %eax,%ebx\n\t"
                    "shrl $8,%ebx\n\t"
                    "andl $0x30,%ebx\n\t"           /* syscall table number */
-#ifdef __APPLE__
-                   "movq %gs:0x30,%rcx\n\t"
-                   "movq 0x330(%rcx),%rcx\n\t"
-#else
-                   "movq %gs:0x330,%rcx\n\t"       /* amd64_thread_data()->syscall_table */
-#endif
+                   "movq 0x370(%r13),%rcx\n\t"     /* thread_data->syscall_table */
                    "leaq (%rcx,%rbx,2),%rbx\n\t"
                    "andl $0xfff,%eax\n\t"          /* syscall number */
                    "cmpq 16(%rbx),%rax\n\t"        /* table->ServiceLimit */
@@ -3251,60 +3246,22 @@ __ASM_GLOBAL_FUNC( __wine_syscall_dispatcher,
                    "shrq $3,%rcx\n\t"
                    "andq $~15,%rsp\n\t"
                    "movq %rsp,%rdi\n\t"
-                   "movq %r15,%rsi\n\t"
+                   "leaq 16(%r15),%rsi\n\t"        /* 7th argument */
                    "cld\n\t"
                    "rep; movsq\n"
                    "1:\tmovq %r10,%rdi\n\t"        /* 1st argument */
                    "movq %r11,%rsi\n\t"            /* 2nd argument */
                    "movq %r8,%rdx\n\t"             /* 3rd argument */
                    "movq %r9,%rcx\n\t"             /* 4th argument */
-                   "movq %r12,%r8\n\t"             /* 5th argument */
-                   "movq %r13,%r9\n\t"             /* 6th argument */
+                   "movq (%r15),%r8\n\t"           /* 5th argument */
+                   "movq 8(%r15),%r9\n\t"          /* 6th argument */
                    "movq (%rbx),%r10\n\t"          /* table->ServiceTable */
                    "callq *(%r10,%rax,8)\n\t"
                    "leaq -0x98(%rbp),%rcx\n\t"
                    __ASM_LOCAL_LABEL("__wine_syscall_dispatcher_return") ":\n\t"
-                   "movl 0xb4(%rcx),%edx\n\t"      /* frame->restore_flags */
-                   "testl $0x48,%edx\n\t"          /* CONTEXT_FLOATING_POINT | CONTEXT_XSTATE */
-                   "jnz 2f\n\t"
-                   "movaps 0x1c0(%rcx),%xmm6\n\t"
-                   "movaps 0x1d0(%rcx),%xmm7\n\t"
-                   "movaps 0x1e0(%rcx),%xmm8\n\t"
-                   "movaps 0x1f0(%rcx),%xmm9\n\t"
-                   "movaps 0x200(%rcx),%xmm10\n\t"
-                   "movaps 0x210(%rcx),%xmm11\n\t"
-                   "movaps 0x220(%rcx),%xmm12\n\t"
-                   "movaps 0x230(%rcx),%xmm13\n\t"
-                   "movaps 0x240(%rcx),%xmm14\n\t"
-                   "movaps 0x250(%rcx),%xmm15\n\t"
-                   "jmp 4f\n"
-                   "2:\ttestl $3,%r14d\n\t"        /* SYSCALL_HAVE_XSAVE | SYSCALL_HAVE_XSAVEC */
-                   "jz 3f\n\t"
-                   "movq %rax,%r11\n\t"
-#ifdef __APPLE__
-                   "movq %gs:0x30,%rdx\n\t"
-                   "movl 0x340(%rdx),%eax\n\t"
-                   "movl 0x344(%rdx),%edx\n\t"
-#else
-                   "movl %gs:0x340,%eax\n\t"       /* amd64_thread_data()->xstate_features_mask */
-                   "movl %gs:0x344,%edx\n\t"       /* amd64_thread_data()->xstate_features_mask high dword */
-#endif
-                   "xrstor64 0xc0(%rcx)\n\t"
-                   "movq %r11,%rax\n\t"
-                   "movl 0xb4(%rcx),%edx\n\t"      /* frame->restore_flags */
-                   "jmp 4f\n"
-                   "3:\tfxrstor64 0xc0(%rcx)\n"
-                   "4:\tmovq 0x98(%rcx),%rbp\n\t"
                    /* push rbp-based kernel stack cfi */
                    __ASM_CFI(".cfi_remember_state\n\t")
                    __ASM_CFI_CFA_IS_AT2(rcx, 0xa8, 0x01) /* frame->syscall_cfa */
-                   "movq 0x68(%rcx),%r15\n\t"
-                   "movq 0x58(%rcx),%r13\n\t"
-                   "movq 0x50(%rcx),%r12\n\t"
-                   "movq 0x80(%rcx),%r11\n\t"      /* frame->eflags */
-                   "movq 0x28(%rcx),%rdi\n\t"
-                   "movq 0x20(%rcx),%rsi\n\t"
-                   "movq 0x08(%rcx),%rbx\n\t"
 
                    /* switch to user stack */
                    /* %rsp outside kernel stack means no longer inside syscall */
@@ -3316,13 +3273,56 @@ __ASM_GLOBAL_FUNC( __wine_syscall_dispatcher,
                    "leaq 0x70(%rcx),%rsp\n\t"
                    "1:\n\t"
 #ifdef __linux__
-                   "testl $12,%r14d\n\t"           /* SYSCALL_HAVE_PTHREAD_TEB | SYSCALL_HAVE_WRFSGSBASE */
+                   "movw 0x338(%r13),%dx\n"        /* amd64_thread_data()->fs */
+                   "testw %dx,%dx\n\t"
                    "jz 1f\n\t"
-                   "movw %gs:0x338,%fs\n"          /* amd64_thread_data()->fs */
+                   "movw %dx,%fs\n"
                    "1:\n\t"
+#elif defined __APPLE__
+                   "movq %rax,%r8\n\t"
+                   "movq %rcx,%rdx\n\t"
+                   "movq %r13,%rdi\n\t"            /* teb */
+                   "xorl %esi,%esi\n\t"
+                   "movl $0x3000003,%eax\n\t"      /* _thread_set_tsd_base */
+                   "syscall\n\t"
+                   "movq %rdx,%rcx\n\t"
+                   "movq %r8,%rax\n\t"
 #endif
-                   "testl $0x10000,%edx\n\t"       /* RESTORE_FLAGS_INSTRUMENTATION */
+                   "movl 0xb4(%rcx),%edx\n\t"      /* frame->restore_flags */
+                   "testl $0x48,%edx\n\t"          /* CONTEXT_FLOATING_POINT | CONTEXT_XSTATE */
+                   "jnz 2f\n\t"
+                   "ldmxcsr 0xd8(%rcx)\n\t"        /* frame->xsave.MxCsr */
+                   "movaps 0x1c0(%rcx),%xmm6\n\t"
+                   "movaps 0x1d0(%rcx),%xmm7\n\t"
+                   "movaps 0x1e0(%rcx),%xmm8\n\t"
+                   "movaps 0x1f0(%rcx),%xmm9\n\t"
+                   "movaps 0x200(%rcx),%xmm10\n\t"
+                   "movaps 0x210(%rcx),%xmm11\n\t"
+                   "movaps 0x220(%rcx),%xmm12\n\t"
+                   "movaps 0x230(%rcx),%xmm13\n\t"
+                   "movaps 0x240(%rcx),%xmm14\n\t"
+                   "movaps 0x250(%rcx),%xmm15\n\t"
+                   "jmp 4f\n"
+                   "2:\tcmpb $0,0x7ffe0285\n\t"    /* user_shared_data->ProcessorFeatures[PF_XSAVE_ENABLED] */
+                   "jz 3f\n\t"
+                   "movq %rax,%r11\n\t"
+                   "movl 0x7ffe03d8,%eax\n\t"      /* user_shared_data->XState.EnabledFeatures */
+                   "movl 0x7ffe03dc,%edx\n\t"
+                   "xrstor64 0xc0(%rcx)\n\t"
+                   "movq %r11,%rax\n\t"
+                   "movl 0xb4(%rcx),%edx\n\t"      /* frame->restore_flags */
+                   "jmp 4f\n"
+                   "3:\tfxrstor64 0xc0(%rcx)\n"
+                   "4:\tmovq 0x98(%rcx),%rbp\n\t"
+                   "movq 0x68(%rcx),%r15\n\t"
                    "movq 0x60(%rcx),%r14\n\t"
+                   "movq 0x58(%rcx),%r13\n\t"
+                   "movq 0x50(%rcx),%r12\n\t"
+                   "movq 0x80(%rcx),%r11\n\t"      /* frame->eflags */
+                   "movq 0x28(%rcx),%rdi\n\t"
+                   "movq 0x20(%rcx),%rsi\n\t"
+                   "movq 0x08(%rcx),%rbx\n\t"
+                   "testl $0x10000,%edx\n\t"       /* RESTORE_FLAGS_INSTRUMENTATION */
                    "jnz 2f\n\t"
                    "3:\ttestl $0x3,%edx\n\t"       /* CONTEXT_CONTROL | CONTEXT_INTEGER */
                    "jnz 1f\n\t"
@@ -3370,14 +3370,12 @@ __ASM_GLOBAL_FUNC( __wine_syscall_dispatcher,
                    "movq 0x40(%rcx),%r10\n\t"
                    "movq 0x48(%rcx),%r11\n\t"
                    "movq 0x10(%rcx),%rcx\n\t"
+                   "pushfq\n\t"
+                   "andq $~0x4000,(%rsp)\n\t" /* make sure NT flag is not set, or iretq will fault */
+                   "popfq\n\t"
                    "iretq\n"
                    /* RESTORE_FLAGS_INSTRUMENTATION */
-#ifdef __APPLE__
-                   "2:\tmovq %gs:0x30,%r10\n\t"
-                   "movq 0x348(%r10),%r10\n\t"
-#else
-                   "2:\tmovq %gs:0x348,%r10\n\t"  /* amd64_thread_data()->instrumentation_callback */
-#endif
+                   "2:\tmovq %gs:0x330,%r10\n\t"  /* amd64_thread_data()->instrumentation_callback */
                    "movq (%r10),%r10\n\t"
                    "test %r10,%r10\n\t"
                    "jz 3b\n\t"
@@ -3392,24 +3390,15 @@ __ASM_GLOBAL_FUNC( __wine_syscall_dispatcher,
 
                    /* pop rbp-based kernel stack cfi */
                    __ASM_CFI("\t.cfi_restore_state\n")
-                   "5:\tmovl $0xc000000d,%eax\n\t" /* STATUS_INVALID_PARAMETER */
+                   "5:\tmovl $0xc000001c,%eax\n\t" /* STATUS_INVALID_SYSTEM_SERVICE */
                    "movq %rsp,%rcx\n\t"
                    "jmp " __ASM_LOCAL_LABEL("__wine_syscall_dispatcher_return") )
 
 __ASM_GLOBAL_FUNC( __wine_syscall_dispatcher_return,
-                   "movq %rdi,%rcx\n\t"
-                   "movl 0xb0(%rcx),%r14d\n\t"     /* frame->syscall_flags */
-                   "movq %rsi,%rax\n\t"
                    "jmp " __ASM_LOCAL_LABEL("__wine_syscall_dispatcher_return") )
 
-
 __ASM_GLOBAL_FUNC( __wine_syscall_dispatcher_instrumentation,
-#ifdef __APPLE__
-                   "movq %gs:0x30,%rcx\n\t"
-                   "movq 0x328(%rcx),%rcx\n\t"
-#else
-                   "movq %gs:0x328,%rcx\n\t"       /* amd64_thread_data()->syscall_frame */
-#endif
+                   "movq %gs:0x378,%rcx\n\t"       /* thread_data->syscall_frame */
                    "popq 0x70(%rcx)\n\t"           /* frame->rip */
                    __ASM_CFI(".cfi_adjust_cfa_offset -8\n\t")
                    __ASM_CFI_REG_IS_AT2(rip, rcx, 0xf0,0x00)
